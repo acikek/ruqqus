@@ -177,7 +177,7 @@ def frontlist(v=None, sort="hot", page=1, nsfw=False, t=None, ids_only=True, **k
         return [x for x in posts.offset(25*(page-1)).limit(25).all()]
 
 
-@app.route("/", methods=["GET"])
+#@app.route("/", methods=["GET"])
 @app.route("/api/v1/front/listing", methods=["GET"])
 @auth_desired
 @api("read")

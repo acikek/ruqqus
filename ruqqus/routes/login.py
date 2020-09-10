@@ -67,7 +67,7 @@ def check_for_alts(current_id):
 
 #login post procedure
 @no_cors
-@app.route("/login", methods=["POST"])
+@app.route("/api/vue/login", methods=["POST"])
 @limiter.limit("6/minute")
 def login_post():
     
@@ -162,7 +162,7 @@ def me(v):
     return redirect(v.url)
 
 
-@app.route("/logout", methods=["POST"])
+@app.route("/api/vue/logout", methods=["POST"])
 @auth_required
 @validate_formkey
 def logout(v):
