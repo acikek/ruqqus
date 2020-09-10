@@ -1,5 +1,11 @@
 #!/bin/sh
 cd ~/
+git clone https://github.com/ruqqus/vue-repo
+cd vue-repo
+npm install
+npm run build
+cp -r dist/ ~/ruqqus/ruqqus/assets
+cd ~/
 sudo cp ruqqus/nginx.txt /etc/nginx/sites-available/ruqqus.com.conf
 sudo nginx -s reload
 source venv/bin/activate
