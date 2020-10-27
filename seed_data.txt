@@ -174,12 +174,12 @@ COPY public.titles (id, is_before, text, qualification_expr, requirement_string,
 19	f	, Bane of Tyrants	v.has_badge(8) and v.has_badge(9)	We rejected foreign orders for your information and to take down your content.	666666	3	\N	\N	0	\N	\N
 14	f	, Guildlord	v.boards_created.filter(Board.subscriber_count>=100000).first()	A Guild you created grows past 100,000 members.	aa8855	1	\N	\N	0	\N	\N
 15	f	, Ultimate Guildlord	v.boards_created.filter(Board.subscriber_count>=1000000).first()	A Guild you created grows past 1,000,000 members.	aa8855	1	\N	\N	0	\N	\N
-32	f	, Bronze Patron	v.patreon_pledge_cents>=100 and v.patreon_pledge_cents<500	Contribute at least $1/month on Patreon	aa8855	2	\N	\N	0	\N	\N
+32	f	, Bronze Patron	v.patreon_pledge_cents>=100 and v.patreon_pledge_cents<500	Contribute at least $1/month on Patreon	aa8855	4	\N	\N	0	\N	\N
 30	f	 the Artisan	v.has_badge(18)	Made a contribution to Ruqqus text or art.	5555dd	3	\N	\N	0	\N	\N
-34	f	Gold Patron	v.patreon_pledge_cents>=2000 and v.patreon_pledge_cents<5000	Contribute at least $20/month on Patreon	502e0e	2	ce9632	f7ce68	5	216, 178, 84	240, 188, 120
-35	f	Diamond Patron	v.patreon_pledge_cents>=5000	Contribute at least $50/month on Patreon	2a4042	2	54c0c0	89e5ee	10	88, 195, 199	191, 220, 216
+34	f	Gold Patron	v.patreon_pledge_cents>=2000 and v.patreon_pledge_cents<5000	Contribute at least $20/month on Patreon	502e0e	4	ce9632	f7ce68	5	216, 178, 84	240, 188, 120
+35	f	Diamond Patron	v.patreon_pledge_cents>=5000	Contribute at least $50/month on Patreon	2a4042	4	54c0c0	89e5ee	10	88, 195, 199	191, 220, 216
 31	f	 the Dumpster Arsonist	v.has_badge(20)	Joined Ruqqus despite the flood of users crashing the site	885588	4	\N	\N	0	\N	\N
-33	f	Silver Patron	v.patreon_pledge_cents>=500 and v.patreon_pledge_cents<2000	Contribute at least $5/month on Patreon	30363c	2	899caa	c6d1dc	4	\N	\N
+33	f	Silver Patron	v.patreon_pledge_cents>=500 and v.patreon_pledge_cents<2000	Contribute at least $5/month on Patreon	30363c	4	899caa	c6d1dc	4	\N	\N
 \.
 
 
