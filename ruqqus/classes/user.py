@@ -675,6 +675,7 @@ class User(Base, Stndrd, Age_times):
                 'permalink': self.permalink,
                 'is_banned': False,
                 'is_premium': self.premium_expires_utc > 0,
+                'created_utc': self.created_utc,
                 'post_rep': int(self.karma),
                 'comment_rep': int(self.comment_karma),
                 'badges': [x.json for x in self.badges],
