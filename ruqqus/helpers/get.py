@@ -152,7 +152,7 @@ def get_posts(pids, sort="hot", v=None):
                 user_id=v.id).subquery()
             blocking = v.blocking.subquery()
             blocked = v.blocked.subquery()
-            subs = v.subscriptions.filter_by(is_active=True).subquery()
+            subs = g.db.query(Subscription).filter_by(user_id=v.id, is_active=True).subquery()
 
             query = g.db.query(
                 Submission,
@@ -526,10 +526,12 @@ def get_from_permalink(link, v=None):
 
     if "+" in link:
 
-        name = re.search("/\+(\w+)", link).match(1)
-        return get_guild(name)
+        x = re.search("/\+(\w+)$", link)
+        if x:
+            name=x.match(1)
+            return get_guild(name)
 
-    ids = re.search("://[^/]+/post/(\w+)/[^/]+(/(\w+))?", link)
+    ids = re.search("://[^/]+/\+\w+/post/(\w+)/[^/]+(/(\w+))?", link)
 
     post_id = ids.group(1)
     comment_id = ids.group(3)

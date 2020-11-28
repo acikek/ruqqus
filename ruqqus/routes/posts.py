@@ -150,6 +150,16 @@ def edit_post(pid, v):
             p.is_offensive = True
             break
 
+    # politics
+    p.is_politics = False
+    for x in g.db.query(PoliticsWord).all():
+        if (p.body and x.check(p.body)) or x.check(p.title):
+            p.is_politics = True
+            break
+
+    g.db.add(p)
+
+
     return redirect(p.permalink)
 
 
@@ -188,7 +198,7 @@ def get_post_title(v):
 
 @app.route("/submit", methods=['POST'])
 @app.route("/api/v1/submit", methods=["POST"])
-@limiter.limit("6/minute")
+#@limiter.limit("6/minute")
 @is_not_banned
 @no_negative_balance('html')
 @tos_agreed
@@ -413,8 +423,10 @@ def submit_post(v):
         send_notification(v, text)
 
         v.ban(reason="Spamming.",
-              include_alts=True,
               days=1)
+
+        for alt in v.alts:
+            alt.ban(reason="Spamming.", days=1)
 
         for post in similar_posts + similar_urls:
             post.is_banned = True
@@ -525,6 +537,13 @@ def submit_post(v):
             is_offensive = True
             break
 
+    #politics
+    is_politics=False
+    for x in g.db.query(PoliticsWord).all():
+        if (body and x.check(body)) or x.check(title):
+            is_politics = True
+            break
+
     new_post = Submission(author_id=v.id,
                           domain_ref=domain_obj.id if domain_obj else None,
                           board_id=board.id,
@@ -536,7 +555,8 @@ def submit_post(v):
                                       "")) or board.over_18),
                           post_public=not board.is_private,
                           repost_id=repost.id if repost else None,
-                          is_offensive=is_offensive
+                          is_offensive=is_offensive,
+                          is_politics=is_politics
                           )
 
     g.db.add(new_post)
@@ -570,6 +590,17 @@ def submit_post(v):
             abort(413)
 
         file = request.files['file']
+        if not file.content_type.startswith('image/'):
+            return {"html": lambda: (render_template("submit.html",
+                                                         v=v,
+                                                         error=f"Image files only.",
+                                                         title=title,
+                                                         body=request.form.get(
+                                                             "body", ""),
+                                                         b=board
+                                                         ), 400),
+                        "api": lambda: ({"error": f"The link `{badlink.link}` is not allowed. Reason: {badlink.reason}"}, 400)
+                        }
 
         name = f'post/{new_post.base36id}/{secrets.token_urlsafe(8)}'
         upload_file(name, file)

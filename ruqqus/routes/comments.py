@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 from werkzeug.contrib.atom import AtomFeed
 from datetime import datetime
 import secrets
+import threading
 
 from ruqqus.helpers.wrappers import *
 from ruqqus.helpers.base36 import *
@@ -329,8 +330,10 @@ def api_comment(v):
             send_notification(v, text)
 
             v.ban(reason="Spamming.",
-                  include_alts=True,
                   days=1)
+
+            for alt in v.alts:
+                alt.ban(reason="Spamming.", days=1)
 
             for comment in similar_comments:
                 comment.is_banned = True
@@ -392,6 +395,9 @@ def api_comment(v):
     if v.has_premium:
         if request.files.get("file"):
             file=request.files["file"]
+            if not file.content_type.startswith('image/'):
+                return jsonify({"error": "That wasn't an image!"}), 400
+            
             name = f'comment/{c.base36id}/{secrets.token_urlsafe(8)}'
             upload_file(name, file)
 
@@ -400,6 +406,21 @@ def api_comment(v):
             with CustomRenderer(post_id=parent_id) as renderer:
                 body_md = renderer.render(mistletoe.Document(body))
             body_html = sanitize(body_md, linkgen=True)
+            
+            #csam detection
+            def del_function():
+                delete_file(name)
+                c.is_banned=True
+                g.db.add(c)
+                g.db.commit()
+                
+            csam_thread=threading.Thread(target=check_csam_url, 
+                                         args=(f"https://{BUCKET}/{name}", 
+                                               v, 
+                                               del_function
+                                              )
+                                        )
+            csam_thread.start()
 
 
 
@@ -622,3 +643,38 @@ def embed_comment_cid(cid, pid=None):
         abort(410)
 
     return render_template("embeds/comment.html", c=comment)
+
+@app.route("/mod/comment_pin/<bid>/<cid>/<x>", methods=["POST"])
+@auth_required
+@is_guildmaster
+@validate_formkey
+def mod_toggle_comment_pin(bid, cid, x, board, v):
+
+    comment = get_comment(cid)
+
+    if comment.post.board_id != board.id:
+        abort(400)
+
+    try:
+        x = bool(int(x))
+    except BaseException:
+        abort(400)
+        
+    #remove previous pin (if exists)
+    if x:
+        previous_sticky = g.db.query(Comment).filter(
+            and_(
+                Comment.parent_submission == comment.post.id, 
+                Comment.is_pinned == True
+                )
+            ).first()
+        if previous_sticky:
+            previous_sticky.is_pinned = False
+            g.db.add(previous_sticky)
+
+    comment.is_pinned = x
+
+    g.db.add(comment)
+
+    return "", 204
+
