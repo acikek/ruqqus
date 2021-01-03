@@ -278,9 +278,6 @@ class Comment(Base, Age_times, Scores, Stndrd, Fuzzing):
                 'is_nsfl': self.is_nsfl,
                 'permalink': self.permalink,
                 'post_id': self.post.base36id,
-                'score': self.score_fuzzed,
-                'upvotes': self.upvotes_fuzzed,
-                'downvotes': self.downvotes_fuzzed,
                 'award_count': self.award_count
                 }
 
@@ -301,6 +298,9 @@ class Comment(Base, Age_times, Scores, Stndrd, Fuzzing):
         data["author"]=self.author.json_core
         data["post"]=self.post.json_core
         data["guild"]=self.post.board.json_core
+        data["score"]=self.score_fuzzed
+        data["upvotes"]=self.upvotes_fuzzed
+        data["downvotes"]=self.downvotes_fuzzed
 
         if self.level >= 2:
             data["parent"]=self.parent.json_core
