@@ -36,7 +36,7 @@ def create_board_get(v):
                                message="You need to step down from a guild before you can make any more." if not v.can_join_gms else "You need more Reputation.")
 
     # check # recent boards made by user
-    cutoff = int(time.time()) - 60 * 60 * 24
+    cutoff = int(time.time()) - 60 * 60 * 48
     recent = g.db.query(Board).filter(
         Board.creator_id == v.id,
         Board.created_utc >= cutoff).all()
