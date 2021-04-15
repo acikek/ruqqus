@@ -5,7 +5,7 @@ from bs4 import BeautifulSoup
 import pyotp
 import qrcode
 import io
-import threading
+import gevent
 
 from ruqqus.helpers.wrappers import *
 from ruqqus.helpers.base36 import *
@@ -46,7 +46,24 @@ def mfa_qr(secret, v):
 @auth_desired
 @api("read")
 def api_is_available(name, v):
-    if get_user(name, graceful=True):
+
+    name=name.lstrip().rstrip()
+
+    if len(name)<5 or len(name)>25:
+        return jsonify({name:False})
+        
+    name=name.replace('_','\_')
+
+    x= g.db.query(User).options(
+        lazyload('*')
+        ).filter(
+        or_(
+            User.username.ilike(name),
+            User.original_username.ilike(name)
+            )
+        ).first()
+
+    if x:
         return jsonify({name: False})
     else:
         return jsonify({name: True})
@@ -55,25 +72,21 @@ def api_is_available(name, v):
 @app.route("/uid/<uid>", methods=["GET"])
 def user_uid(uid):
 
-    user = g.db.query(User).filter_by(id=base36decode(uid)).first()
-    if user:
-        return redirect(user.permalink)
-    else:
-        abort(404)
+    user = get_account(uid)
+
+    return redirect(user.permalink)
 
 # Allow Id of user to be queryied, and then redirect the bot to the
 # actual user api endpoint.
 # So they get the data and then there will be no need to reinvent
 # the wheel.
-@app.route("/api/v1/user/by_id/<uid>", methods=["GET"])
+@app.route("/api/v1/uid/<uid>", methods=["GET"])
 @auth_desired
 @api("read")
 def user_by_uid(uid, v=None):
-    user=g.db.query(User).filter_by(id=base36decode(uid)).first()
-    if user == None:
-      abort(404)
+    user=get_account(uid)
     
-    return redirect(f"/api/v1/user/{user.username}")
+    return redirect(f'/api/v1/user/{user.username}/info')
         
 @app.route("/u/<username>", methods=["GET"])
 def redditor_moment_redirect(username):
@@ -102,7 +115,7 @@ def u_username(username, v=None):
         return {'html': lambda: render_template("userpage_reserved.html",
                                                 u=u,
                                                 v=v),
-                'api': lambda: {"error": "That user is banned"}
+                'api': lambda: {"error": f"That username is reserved for: {u.reserved}"}
                 }
 
     if u.is_suspended and (not v or v.admin_level < 3):
@@ -185,7 +198,7 @@ def u_username_comments(username, v=None):
         return {'html': lambda: render_template("userpage_reserved.html",
                                                 u=u,
                                                 v=v),
-                'api': lambda: {"error": "That user is banned"}
+                'api': lambda: {"error": f"That username is reserved for: {u.reserved}"}
                 }
 
     if u.is_suspended and (not v or v.admin_level < 3):
@@ -245,6 +258,20 @@ def u_username_comments(username, v=None):
                                             standalone=True),
             "api": lambda: jsonify({"data": [c.json for c in listing]})
             }
+
+@app.route("/api/v1/user/<username>/info", methods=["GET"])
+@auth_desired
+@api("read")
+def u_username_info(username, v=None):
+
+    user=get_user(username, v=v)
+
+    if user.is_blocking:
+        return jsonify({"error": "You're blocking this user."}), 401
+    elif user.is_blocked:
+        return jsonify({"error": "This user is blocking you."}), 403
+
+    return jsonify(user.json)
 
 
 @app.route("/api/follow/<username>", methods=["POST"])
@@ -309,6 +336,12 @@ def api_agree_tos(v):
 @limiter.exempt
 def user_profile(username):
     x = get_user(username)
+    return redirect(x.profile_url)
+
+@app.route("/uid/<uid>/pic/profile")
+@limiter.exempt
+def user_profile_uid(uid):
+    x=get_account(uid)
     return redirect(x.profile_url)
 
 
@@ -394,31 +427,32 @@ def info_packet(username, method="html"):
 
         user=get_user(username)
 
-        print('submissions')
         #submissions
-        post_ids=db.query(Submission.id).filter_by(author_id=user.id).order_by(Submission.id.desc()).all()
-        posts=get_posts([i[0] for i in post_ids], v=user)
+        post_ids=db.query(Submission.id).filter_by(author_id=user.id).order_by(Submission.created_utc.desc()).all()
+        post_ids=[i[0] for i in post_ids]
+        posts=get_posts(post_ids, v=user)
         packet["posts"]={
             'html':lambda:render_template("userpage.html", v=None, u=user, listing=posts, page=1, next_exists=False),
             'json':lambda:[x.self_download_json for x in posts]
         }
 
-        print('comments')
-        comment_ids=db.query(Comment.id).filter_by(author_id=user.id).order_by(Comment.id.desc()).all()
-        comments=get_comments([i[0] for i in comment_ids], v=user)
+        #comments
+        comment_ids=db.query(Comment.id).filter_by(author_id=user.id).order_by(Comment.created_utc.desc()).all()
+        comment_ids=[x[0] for x in comment_ids]
+        comments=get_comments(comment_ids, v=user)
         packet["comments"]={
-            'html':lambda:render_template("userpage_comments.html", v=None, u=user, comments=comments, page=1, next_exists=False),
+            'html':lambda:render_template("userpage_comments.html", v=None, u=user, listing=comments, page=1, next_exists=False),
             'json':lambda:[x.self_download_json for x in comments]
         }
 
-        print('post_upvotes')
+        #upvoted posts
         upvote_query=db.query(Vote.submission_id).filter_by(user_id=user.id, vote_type=1).order_by(Vote.id.desc()).all()
         upvote_posts=get_posts([i[0] for i in upvote_query], v=user)
         upvote_posts=[i for i in upvote_posts]
         for post in upvote_posts:
             post.__dict__['voted']=1
         packet['upvoted_posts']={
-            'html':lambda:render_template("home.html", v=None, listing=posts, page=1, next_exists=False),
+            'html':lambda:render_template("userpage.html", v=None, listing=posts, page=1, next_exists=False),
             'json':lambda:[x.json_core for x in upvote_posts]
         }
 
@@ -426,7 +460,7 @@ def info_packet(username, method="html"):
         downvote_query=db.query(Vote.submission_id).filter_by(user_id=user.id, vote_type=-1).order_by(Vote.id.desc()).all()
         downvote_posts=get_posts([i[0] for i in downvote_query], v=user)
         packet['downvoted_posts']={
-            'html':lambda:render_template("home.html", v=None, listing=posts, page=1, next_exists=False),
+            'html':lambda:render_template("userpage.html", v=None, listing=posts, page=1, next_exists=False),
             'json':lambda:[x.json_core for x in downvote_posts]
         }
 
@@ -434,7 +468,7 @@ def info_packet(username, method="html"):
         upvote_query=db.query(CommentVote.comment_id).filter_by(user_id=user.id, vote_type=1).order_by(CommentVote.id.desc()).all()
         upvote_comments=get_comments([i[0] for i in upvote_query], v=user)
         packet["upvoted_comments"]={
-            'html':lambda:render_template("notifications.html", v=None, comments=upvote_comments, page=1, next_exists=False),
+            'html':lambda:render_template("userpage_comments.html", v=None, listing=upvote_comments, page=1, next_exists=False),
             'json':lambda:[x.json_core for x in upvote_comments]
         }
 
@@ -442,16 +476,17 @@ def info_packet(username, method="html"):
         downvote_query=db.query(CommentVote.comment_id).filter_by(user_id=user.id, vote_type=-1).order_by(CommentVote.id.desc()).all()
         downvote_comments=get_comments([i[0] for i in downvote_query], v=user)
         packet["downvoted_comments"]={
-            'html':lambda:render_template("notifications.html", v=None, comments=downvote_comments, page=1, next_exists=False),
+            'html':lambda:render_template("userpage_comments.html", v=None, listing=downvote_comments, page=1, next_exists=False),
             'json':lambda:[x.json_core for x in downvote_comments]
         }
 
-    # blocked_users=db.query(UserBlock.target_id).filter_by(user_id=user.id).order_by(UserBlock.id.desc()).all()
-    # users=[get_account(base36encode(x[0])) for x in blocked_users]
-    # packet["blocked_users"]={
-    #     "html":lambda:render_template
-    #     "json":lambda:[x.json_core for x in users]
-    # }
+        print('blocked users')
+        blocked_users=db.query(UserBlock.target_id).filter_by(user_id=user.id).order_by(UserBlock.id.desc()).all()
+        users=[get_account(base36encode(x[0])) for x in blocked_users]
+        packet["blocked_users"]={
+            "html":lambda:render_template("admin/new_users.html", users=users, v=None, page=1, next_exists=False),
+            "json":lambda:[x.json_core for x in users]
+        }
 
 
 
@@ -461,7 +496,7 @@ def info_packet(username, method="html"):
             "Your Ruqqus Data",
             "Your Ruqqus data is attached.",
             "Your Ruqqus data is attached.",
-            files={f"{user.username}_{entry}.{method}": io.StringIO(convert_file(packet[entry][method]())) for entry in packet}
+            files={f"{user.username}_{entry}.{method}": io.StringIO(convert_file(str(packet[entry][method]()))) for entry in packet}
         )
 
 
@@ -470,9 +505,10 @@ def info_packet(username, method="html"):
 
 
 #@app.route("/my_info", methods=["POST"])
-#@auth_required
-#@validate_formkey
-def my_info_put(v):
+#@limiter.limit("2/day")
+@auth_required
+@validate_formkey
+def my_info_post(v):
 
     if not v.is_activated:
         return redirect("/settings/security")
@@ -481,9 +517,6 @@ def my_info_put(v):
     if method not in ['html','json']:
         abort(400)
 
-    thread=threading.Thread(target=info_packet, args=(v.username,), kwargs={'method':method}, daemon=True)
-    thread.start()
-
-    #info_packet(g.db, v)
+    gevent.spawn_later(5, info_packet, v.username, method=method)
 
     return "started"

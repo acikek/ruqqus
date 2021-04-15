@@ -294,58 +294,34 @@ function approveComment(post_id) {
   post(url, callback, "Unable to approve post at this time. Please try again later.")
 }
 
-function distinguishModComment(post_id) {
-  url="/api/distinguish_comment/"+post_id
+admin_comment=function(cid){
 
-  callback=function(){
-    document.getElementById("comment-"+post_id+"-only").classList.add("distinguish-mod");
 
-    button=document.getElementById("distinguish-"+post_id);
-    button.onclick=function(){undistinguishModComment(post_id)};
-    button.innerHTML="undistinguish"
+  var xhr = new XMLHttpRequest();
+  xhr.open("post", "/api/distinguish_comment/"+cid);
+
+  var form = new FormData();
+
+  form.append('formkey', formkey());
+
+  xhr.withCredentials=true;
+  xhr.onload=function(){
+    if (xhr.status==200) {
+      comment=document.getElementById('comment-'+cid+'-only');
+      comment.innerHTML=JSON.parse(xhr.response)["html"];
+    }
+    else {
+      var commentError = document.getElementById("comment-error-text");
+      $('#toast-comment-success').toast('dispose');
+      $('#toast-comment-error').toast('dispose');
+      $('#toast-comment-error').toast('show');
+      commentError.textContent = JSON.parse(xhr.response)["error"];
+    }
   }
-
-  post(url, callback, "Unable to distinguish comment at this time. Please try again later.")
-};
-
-function undistinguishModComment(post_id) {
-  url="/api/undistinguish_comment/"+post_id
-
-  callback=function(){
-    document.getElementById("comment-"+post_id+"-only").classList.remove("distinguish-mod");
-
-    button=document.getElementById("distinguish-"+post_id);
-    button.onclick=function(){distinguishModComment(post_id)};
-    button.innerHTML="distinguish"
-  }
-  post(url, callback, "Unable to undistinguish comment at this time. Please try again later.")
-};
-
-function distinguishAdminComment(post_id) {
-  url="/api/distinguish_comment/"+post_id
-
-  callback=function(){
-    document.getElementById("comment-"+post_id+"-only").classList.add("distinguish-admin");
-
-    button=document.getElementById("distinguish-"+post_id);
-    button.onclick=function(){undistinguishAdminComment(post_id)};
-    button.innerHTML="undistinguish"
-  }
-  post(url, callback, "Unable to distinguish comment at this time. Please try again later.")
-};
-
-function undistinguishAdminComment(post_id) {
-  url="/api/undistinguish_comment/"+post_id
-
-  callback=function(){
-    document.getElementById("comment-"+post_id+"-only").classList.remove("distinguish-admin");
-
-    button=document.getElementById("distinguish-"+post_id);
-    button.onclick=function(){distinguishAdminComment(post_id)};
-    button.innerHTML="distinguish"
-  }
-  post(url, callback, "Unable to undistinguish post at this time. Please try again later.")
+  xhr.send(form)
 }
+
+
 
 //comment replies
 
@@ -422,10 +398,10 @@ function switch_css() {
   dswitch = document.getElementById("dark-switch");
   dswitchmobile = document.getElementById("dark-switch-mobile");
 
-  if (css.href.endsWith("/assets/style/main.css")) {
+  if (css.href.includes("/assets/style/main.css")) {
     post("/settings/dark_mode/1",
       callback=function(){
-        css.href="/assets/style/main_dark.css";
+        css.href="/assets/style/main_dark.css?v=2.35.62";
         dswitch.classList.remove("fa-toggle-off");
         dswitch.classList.add("fa-toggle-on");
         dswitchmobile.classList.remove("fa-toggle-off");
@@ -436,7 +412,7 @@ function switch_css() {
   else {
     post("/settings/dark_mode/0",
       callback=function(){
-        css.href="/assets/style/main.css";
+        css.href="/assets/style/main.css?v=2.35.62";
         dswitch.classList.remove("fa-toggle-on");
         dswitch.classList.add("fa-toggle-off");
         dswitchmobile.classList.remove("fa-toggle-on");
@@ -741,13 +717,18 @@ function post_toast(url, callback) {
         $('#toast-post-success').toast('show');
         document.getElementById('toast-post-success-text').innerText = JSON.parse(xhr.response)["message"];
         callback(xhr)
+        return true
 
       } else if (xhr.status >= 300 && xhr.status < 400) {
         window.location.href = JSON.parse(xhr.response)["redirect"]
       } else {
+        data=JSON.parse(xhr.response);
+        
         $('#toast-post-error').toast('dispose');
         $('#toast-post-error').toast('show');
-        document.getElementById('toast-post-error-text').innerText = JSON.parse(xhr.response)["error"];
+        document.getElementById('toast-post-error-text').innerText = data["error"];
+        return false
+        
       }
     };
 
@@ -929,6 +910,7 @@ function toggle_sidebar_expand() {
 // Voting
 
 var upvote = function(event) {
+
   var type = event.target.dataset.contentType;
   var id = event.target.dataset.idUp;
 
@@ -978,6 +960,7 @@ var upvote = function(event) {
 }
 
 var downvote = function(event) {
+
   var type = event.target.dataset.contentType;
   var id = event.target.dataset.idDown;
 
@@ -1258,25 +1241,23 @@ var attribution = document.getElementById("modal-image-attribution");
 // Link text
 
 var linkText = document.getElementById("desktop-expanded-image-link");
+var imgLink = document.getElementById("desktop-expanded-image-wrap-link");
 
 var inlineImage = document.getElementById("desktop-expanded-image");
 
 inlineImage.src = image;
 
+linkText.href = link;
+imgLink.href=link;
+
 if (image.includes("i.ruqqus.com")) {
-	linkText.href = link;
 	linkText.textContent = 'Go to website';
 }
-else if (image.includes("imgur.com") || image.includes("cdn.discordapp.com")){
-	linkText.href = image;
-	linkText.textContent = 'View original';
-}
 else {
-	linkText.href = image;
 	linkText.textContent = 'View original';
 }
 
-if (image.includes("media.giphy.com")) {
+if (image.startsWith("https://media.giphy.com")) {
 	attribution.innerHTML = '<img src="/assets/images/icons/PoweredBy_200px-Black_HorizLogo.png" style="width: 100px;">';
 
   var GIPHYsrc = image.replace(/\b100w\b~?/g, 'giphy');
@@ -1561,7 +1542,7 @@ function autoSuggestTitle()  {
         checkForRequired()
       }
     }
-    x.open('get','/api/submit/title?url=' + urlField.value);
+    x.open('get','/submit/title?url=' + urlField.value);
     x.send(null);
 
   };
@@ -1720,7 +1701,6 @@ block_user=function() {
 
 post_comment=function(fullname){
 
-  var commentError = document.getElementById("comment-error-text");
 
   var form = new FormData();
 
@@ -1743,6 +1723,37 @@ post_comment=function(fullname){
       $('#toast-comment-success').toast('show');
     }
     else {
+      var commentError = document.getElementById("comment-error-text");
+      $('#toast-comment-success').toast('dispose');
+      $('#toast-comment-error').toast('dispose');
+      $('#toast-comment-error').toast('show');
+      commentError.textContent = JSON.parse(xhr.response)["error"];
+    }
+  }
+  xhr.send(form)
+
+  document.getElementById('save-reply-to-'+fullname).classList.add('disabled');
+
+}
+
+herald_comment=function(bid,cid){
+
+
+  var xhr = new XMLHttpRequest();
+  xhr.open("post", "/mod/distinguish_comment/"+bid+'/'+cid);
+
+  var form = new FormData();
+
+  form.append('formkey', formkey());
+
+  xhr.withCredentials=true;
+  xhr.onload=function(){
+    if (xhr.status==200) {
+      comment=document.getElementById('comment-'+cid+'-only');
+      comment.innerHTML=JSON.parse(xhr.response)["html"];
+    }
+    else {
+      var commentError = document.getElementById("comment-error-text");
       $('#toast-comment-success').toast('dispose');
       $('#toast-comment-error').toast('dispose');
       $('#toast-comment-error').toast('show');
@@ -1752,6 +1763,37 @@ post_comment=function(fullname){
   xhr.send(form)
 
 }
+
+pin_comment=function(bid,cid){
+
+
+  var xhr = new XMLHttpRequest();
+  xhr.open("post", "/mod/comment_pin/"+bid+'/'+cid);
+
+  var form = new FormData();
+
+  form.append('formkey', formkey());
+
+  xhr.withCredentials=true;
+  xhr.onload=function(){
+    if (xhr.status==200) {
+      comment=document.getElementById('comment-'+cid+'-only');
+      comment.innerHTML=JSON.parse(xhr.response)["html"];
+    }
+    else {
+      var commentError = document.getElementById("comment-error-text");
+      $('#toast-comment-success').toast('dispose');
+      $('#toast-comment-error').toast('dispose');
+      $('#toast-comment-error').toast('show');
+      commentError.textContent = JSON.parse(xhr.response)["error"];
+    }
+  }
+  xhr.send(form)
+
+}
+
+
+
 //part of submit page js
 
 hide_image=function(){
@@ -1881,17 +1923,17 @@ var tipModal2 = function(id, content, link, recipient, recipientPFP) {
   console.log(recipientPFP, id, content, link, recipient)
 }
 
-var togglecat = function(sort, reload=false, delay=1000) {
+var togglecat = function(sort, reload=false, delay=1000, page="/all") {
   var cbs = document.getElementsByClassName('cat-check');
   var l = []
   for (var i=0; i< cbs.length; i++) {
     l.push(cbs[i].checked)
   }
-  setTimeout(function(){triggercat(sort, l, reload)}, delay)
+  setTimeout(function(){triggercat(sort, l, reload, page)}, delay)
   return l;
 }
 
-var triggercat=function(sort, cats, reload) {
+var triggercat=function(sort, cats, reload, page) {
 
   var cbs = document.getElementsByClassName('cat-check');
   var l = []
@@ -1934,7 +1976,7 @@ var triggercat=function(sort, cats, reload) {
 
   xhr.onload=function(){
     if (reload){
-      document.location.href='/all'
+      document.location.href=page
     }
     else {
       var l = document.getElementById('posts');
@@ -1999,7 +2041,7 @@ var cattoggle=function(id){
   card.classList.toggle('selected');
 }
 
-var all_cats=function() {
+var all_cats=function(page) {
   var x=document.getElementsByClassName('cat-check');
   for(i=0;i<x.length;i++){
     x[i].checked=true;
@@ -2010,5 +2052,41 @@ var all_cats=function() {
     y[i].checked=true;
   };
 
-  togglecat('hot', reload=true, delay=0)  
+  togglecat('hot', reload=true, delay=0, page=page)  
 }
+
+
+//mobile prompt
+if (("standalone" in window.navigator) &&       // Check if "standalone" property exists
+    window.navigator.standalone){               // Test if using standalone navigator
+
+    // Web page is loaded via app mode (full-screen mode)
+    // (window.navigator.standalone is TRUE if user accesses website via App Mode)
+
+} else {
+  if (window.innerWidth <= 737){
+    $('#mobile-prompt').tooltip('show')
+    $('.tooltip')[0].addEventListener(
+      'click', 
+      function(event){
+        $('#mobile-prompt').tooltip('hide')
+        var xhr = new XMLHttpRequest();
+        xhr.withCredentials=true;
+        xhr.open("POST", '/dismiss_mobile_tip', true);
+        xhr.send();
+      }
+      )
+  }
+}
+
+$('.mention-user').click(function (event) {
+
+  if (event.which != 1) {
+    return
+  }
+
+  event.preventDefault();
+
+  window.location.href='/@' + $(this).data('original-name');
+
+});

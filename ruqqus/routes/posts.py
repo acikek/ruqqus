@@ -24,7 +24,7 @@ from ruqqus.helpers.alerts import send_notification
 from ruqqus.classes import *
 from .front import frontlist
 from flask import *
-from ruqqus.__main__ import app, limiter, cache
+from ruqqus.__main__ import app, limiter, cache, db_session
 
 BAN_REASONS = ['',
                "URL shorteners are not permitted.",
@@ -32,7 +32,7 @@ BAN_REASONS = ['',
                "Copyright infringement is not permitted."
                ]
 
-BUCKET = "i.ruqqus.com"
+BUCKET = app.config.get("S3_BUCKET", "i.ruqqus.com")
 
 
 @app.route("/post_short/", methods=["GET"])
@@ -60,6 +60,7 @@ def incoming_post_shortlink(base36id=None):
 @app.route("/api/v1/post/<base36id>", methods=["GET"])
 @app.route("/test/post/<base36id>", methods=["GET"])
 @auth_desired
+
 @api("read")
 def post_base36id(base36id, boardname=None, anything=None, v=None):
     
@@ -69,6 +70,7 @@ def post_base36id(base36id, boardname=None, anything=None, v=None):
 
     board = post.board
     #if the guild name is incorrect, fix the link and redirect
+
 
     if boardname and not boardname == board.name:
         return redirect(post.permalink)
@@ -86,6 +88,7 @@ def post_base36id(base36id, boardname=None, anything=None, v=None):
                                t=t,
                                lo_formkey=make_logged_out_formkey(t),
                                board=post.board
+
                                ),
                 "api":lambda:(jsonify({"error":"Must be 18+ to view"}), 451)
                 }
@@ -111,6 +114,7 @@ def post_base36id_noboard(base36id, anything=None, v=None):
     return redirect(post.permalink)
 
 
+
 @app.route("/submit", methods=["GET"])
 @is_not_banned
 @no_negative_balance("html")
@@ -119,7 +123,9 @@ def submit_get(v):
     board = request.args.get("guild", "general")
     b = get_guild(board, graceful=True)
     if not b:
+
         b = get_guild("general")
+
 
     return render_template("submit.html",
                            v=v,
@@ -150,6 +156,51 @@ def edit_post(pid, v):
         body_md = renderer.render(mistletoe.Document(body))
     body_html = sanitize(body_md, linkgen=True)
 
+
+    # Run safety filter
+    bans = filter_comment_html(body_html)
+    if bans:
+        ban = bans[0]
+        reason = f"Remove the {ban.domain} link from your post and try again."
+        if ban.reason:
+            reason += f" {ban.reason_text}"
+            
+        #auto ban for digitally malicious content
+        if any([x.reason==4 for x in bans]):
+            v.ban(days=30, reason="Digitally malicious content is not allowed.")
+            abort(403)
+            
+        return {"error": reason}, 403
+
+    # check spam
+    soup = BeautifulSoup(body_html, features="html.parser")
+    links = [x['href'] for x in soup.find_all('a') if x.get('href')]
+
+    for link in links:
+        parse_link = urlparse(link)
+        check_url = ParseResult(scheme="https",
+                                netloc=parse_link.netloc,
+                                path=parse_link.path,
+                                params=parse_link.params,
+                                query=parse_link.query,
+                                fragment='')
+        check_url = urlunparse(check_url)
+
+        badlink = g.db.query(BadLink).filter(
+            literal(check_url).contains(
+                BadLink.link)).first()
+        if badlink:
+            if badlink.autoban:
+                text = "Your Ruqqus account has been suspended for 1 day for the following reason:\n\n> Too much spam!"
+                send_notification(v, text)
+                v.ban(days=1, reason="spam")
+
+                return redirect('/notifications')
+            else:
+
+                return {"error": f"The link `{badlink.link}` is not allowed. Reason: {badlink.reason}"}
+
+
     p.body = body
     p.body_html = body_html
     p.edited_utc = int(time.time())
@@ -161,21 +212,13 @@ def edit_post(pid, v):
             p.is_offensive = True
             break
 
-    # politics
-    p.is_politics = False
-    for x in g.db.query(PoliticsWord).all():
-        if (p.body and x.check(p.body)) or x.check(p.title):
-            p.is_politics = True
-            break
-
     g.db.add(p)
-
 
     return redirect(p.permalink)
 
 
-@app.route("/api/submit/title", methods=['GET'])
-@limiter.limit("3/minute")
+@app.route("/submit/title", methods=['GET'])
+@limiter.limit("6/minute")
 @is_not_banned
 @no_negative_balance("html")
 #@tos_agreed
@@ -186,14 +229,17 @@ def get_post_title(v):
     if not url:
         return abort(400)
 
-    headers = {"User-Agent": app.config["UserAgent"]}
+    #mimic chrome browser agent
+    headers = {"User-Agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.72 Safari/537.36"}
     try:
         x = requests.get(url, headers=headers)
     except BaseException:
         return jsonify({"error": "Could not reach page"}), 400
 
+
     if not x.status_code == 200:
         return jsonify({"error": f"Page returned {x.status_code}"}), x.status_code
+
 
     try:
         soup = BeautifulSoup(x.content, 'html.parser')
@@ -209,6 +255,7 @@ def get_post_title(v):
 
 @app.route("/submit", methods=['POST'])
 @app.route("/api/v1/submit", methods=["POST"])
+@app.route("/api/vue/submit", methods=["POST"])
 #@limiter.limit("6/minute")
 @is_not_banned
 @no_negative_balance('html')
@@ -253,6 +300,7 @@ def submit_post(v):
     #                            b=board
     #                            )
 
+
     elif len(title) > 500:
         return {"html": lambda: (render_template("submit.html",
                                                  v=v,
@@ -281,9 +329,10 @@ def submit_post(v):
                 "api": lambda: ({"error": "`url` or `body` parameter required."}, 400)
                 }
     # sanitize title
-    title = bleach.clean(title)
+    title = bleach.clean(title, tags=[])
 
     # Force https for submitted urls
+
     if request.form.get("url"):
         new_url = ParseResult(scheme="https",
                               netloc=parsed_url.netloc,
@@ -298,8 +347,9 @@ def submit_post(v):
     body = request.form.get("body", "")
     # check for duplicate
     dup = g.db.query(Submission).join(Submission.submission_aux).filter(
+
         Submission.author_id == v.id,
-        Submission.is_deleted == False,
+        Submission.deleted_utc == 0,
         Submission.board_id == board.id,
         SubmissionAux.title == title,
         SubmissionAux.url == url,
@@ -308,6 +358,7 @@ def submit_post(v):
 
     if dup:
         return redirect(dup.permalink)
+
 
     # check for domain specific rules
 
@@ -321,7 +372,9 @@ def submit_post(v):
         if not domain_obj.can_submit:
           
             if domain_obj.reason==4:
-                v.ban(days=30, reason="Digitally malicious content is not allowed")
+                v.ban(days=30, reason="Digitally malicious content")
+            elif domain_obj.reason==7:
+                v.ban(reason="Sexualizing minors")
 
             return {"html": lambda: (render_template("submit.html",
                                                      v=v,
@@ -344,6 +397,7 @@ def submit_post(v):
         else:
             embed = ""
     else:
+
         embed = ""
 
     # board
@@ -357,6 +411,7 @@ def submit_post(v):
         board = get_guild('general')
 
     if board.is_banned:
+
         return {"html": lambda: (render_template("submit.html",
                                                  v=v,
                                                  error=f"+{board.name} has been banned.",
@@ -407,17 +462,17 @@ def submit_post(v):
         ).join(
             Submission.submission_aux
         ).filter(
-            or_(
-                and_(
+            #or_(
+            #    and_(
                     Submission.author_id == v.id,
                     SubmissionAux.title.op('<->')(title) < app.config["SPAM_SIMILARITY_THRESHOLD"],
                     Submission.created_utc > cutoff
-                ),
-                and_(
-                    SubmissionAux.title.op('<->')(title) < app.config["SPAM_SIMILARITY_THRESHOLD"]/2,
-                    Submission.created_utc > cutoff
-                )
-            )
+            #    ),
+            #    and_(
+            #        SubmissionAux.title.op('<->')(title) < app.config["SPAM_SIMILARITY_THRESHOLD"]/2,
+            #        Submission.created_utc > cutoff
+            #    )
+            #)
     ).all()
 
     if url:
@@ -426,17 +481,17 @@ def submit_post(v):
         ).join(
             Submission.submission_aux
         ).filter(
-            or_(
-                and_(
+            #or_(
+            #    and_(
                     Submission.author_id == v.id,
                     SubmissionAux.url.op('<->')(url) < app.config["SPAM_URL_SIMILARITY_THRESHOLD"],
                     Submission.created_utc > cutoff
-                ),
-                and_(
-                    SubmissionAux.url.op('<->')(url) < app.config["SPAM_URL_SIMILARITY_THRESHOLD"]/2,
-                    Submission.created_utc > cutoff
-                )
-            )
+            #    ),
+            #    and_(
+            #        SubmissionAux.url.op('<->')(url) < app.config["SPAM_URL_SIMILARITY_THRESHOLD"]/2,
+            #        Submission.created_utc > cutoff
+            #    )
+            #)
         ).all()
     else:
         similar_urls = []
@@ -456,10 +511,12 @@ def submit_post(v):
               days=1)
 
         for alt in v.alts:
-            alt.ban(reason="Spamming.", days=1)
+            if not alt.is_suspended:
+                alt.ban(reason="Spamming.", days=1)
 
         for post in similar_posts + similar_urls:
             post.is_banned = True
+            post.is_pinned = False
             post.ban_reason = "Automatic spam removal. This happened because the post's creator submitted too much similar content too quickly."
             g.db.add(post)
             ma=ModAction(
@@ -505,6 +562,7 @@ def submit_post(v):
     # render text
 
     body=preprocess(body)
+
     with CustomRenderer() as renderer:
         body_md = renderer.render(mistletoe.Document(body))
     body_html = sanitize(body_md, linkgen=True)
@@ -582,13 +640,16 @@ def submit_post(v):
         repost = g.db.query(Submission).join(Submission.submission_aux).filter(
             SubmissionAux.url.ilike(url),
             Submission.board_id == board.id,
-            Submission.is_deleted == False,
+            Submission.deleted_utc == 0,
             Submission.is_banned == False
         ).order_by(
             Submission.id.asc()
         ).first()
     else:
         repost = None
+
+    if repost and request.values.get("no_repost"):
+        return redirect(repost.permalink)
 
     if request.files.get('file') and not v.can_submit_image:
         abort(403)
@@ -600,28 +661,25 @@ def submit_post(v):
             is_offensive = True
             break
 
-    #politics
-    is_politics=False
-    for x in g.db.query(PoliticsWord).all():
-        if (body and x.check(body)) or x.check(title):
-            is_politics = True
-            break
-
-    new_post = Submission(author_id=v.id,
-                          domain_ref=domain_obj.id if domain_obj else None,
-                          board_id=board.id,
-                          original_board_id=board.id,
-                          over_18=(
-                              bool(
-                                  request.form.get(
-                                      "over_18",
-                                      "")) or board.over_18),
-                          post_public=not board.is_private,
-                          repost_id=repost.id if repost else None,
-                          is_offensive=is_offensive,
-                          is_politics=is_politics,
-                          app_id=v.client.application.id if v.client else None
-                          )
+    new_post = Submission(
+        author_id=v.id,
+        domain_ref=domain_obj.id if domain_obj else None,
+        board_id=board.id,
+        original_board_id=board.id,
+        over_18=(
+            bool(
+                request.form.get(
+                    "over_18",
+                    "")
+                ) or board.over_18
+            ),
+        post_public=not board.is_private,
+        repost_id=repost.id if repost else None,
+        is_offensive=is_offensive,
+        app_id=v.client.application.id if v.client else None,
+        creation_region=request.headers.get("cf-ipcountry"),
+        is_bot = request.headers.get("X-User-Type")=="Bot"
+        )
 
     g.db.add(new_post)
     g.db.flush()
@@ -663,7 +721,7 @@ def submit_post(v):
                                                              "body", ""),
                                                          b=board
                                                          ), 400),
-                        "api": lambda: ({"error": f"The link `{badlink.link}` is not allowed. Reason: {badlink.reason}"}, 400)
+                        "api": lambda: ({"error": f"Image files only"}, 400)
                         }
 
         name = f'post/{new_post.base36id}/{secrets.token_urlsafe(8)}'
@@ -679,25 +737,25 @@ def submit_post(v):
         g.db.add(new_post)
 
         #csam detection
-        def del_function():
+        def del_function(db):
             delete_file(name)
             new_post.is_banned=True
-            g.db.add(new_post)
-            g.db.commit()
+            db.add(new_post)
+            db.commit()
             ma=ModAction(
                 kind="ban_post",
                 user_id=1,
-                note="csam detected",
+                note="banned image",
                 target_submission_id=new_post.id
                 )
-            g.db.add(ma)
-            g.db.commit()
+            db.add(ma)
+            db.commit()
 
             
         csam_thread=threading.Thread(target=check_csam_url, 
                                      args=(f"https://{BUCKET}/{name}", 
                                            v, 
-                                           del_function
+                                           lambda:del_function(db=db_session())
                                           )
                                     )
         csam_thread.start()
@@ -705,7 +763,7 @@ def submit_post(v):
     g.db.commit()
 
     # spin off thumbnail generation and csam detection as  new threads
-    if new_post.url or request.files.get('file'):
+    if (new_post.url or request.files.get('file')) and (v.is_activated or request.headers.get('cf-ipcountry')!="T1"):
         new_thread = threading.Thread(target=thumbnail_thread,
                                       args=(new_post.base36id,)
                                       )
@@ -713,7 +771,7 @@ def submit_post(v):
 
 
     # expire the relevant caches: front page new, board new
-    #cache.delete_memoized(frontlist, sort="new")
+    cache.delete_memoized(frontlist)
     g.db.commit()
     cache.delete_memoized(Board.idlist, board, sort="new")
 
@@ -757,7 +815,7 @@ def delete_post_pid(pid, v):
     if not post.author_id == v.id:
         abort(403)
 
-    post.is_deleted = True
+    post.deleted_utc = int(time.time())
     post.is_pinned = False
     post.stickied = False
 
@@ -827,7 +885,6 @@ def toggle_post_nsfw(pid, v):
             )
         g.db.add(ma)
 
-
     return "", 204
 
 
@@ -875,7 +932,7 @@ def retry_thumbnail(pid, v):
         abort(403)
 
     new_thread = threading.Thread(target=thumbnail_thread,
-                                  args=(new_post.base36id,)
+                                  args=(post.base36id,)
                                   )
     new_thread.start()
     return jsonify({"message": "Thumbnail Retry Queued"})

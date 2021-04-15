@@ -19,7 +19,7 @@ class ModAction(Base, Stndrd, Age_times):
     target_comment_id = Column(Integer, ForeignKey("comments.id"), default=0)
     #targetLodge = Column(Integer, ForeignKey("lodges.id"), default=0)
     #targetRule = Column(Boolean, ForeignKey("rules.id"), default=False)
-    note=Column(String(256), default=None)
+    _note=Column(String(256), default=None)
     created_utc = Column(Integer, default=0)
 
 
@@ -36,6 +36,9 @@ class ModAction(Base, Stndrd, Age_times):
         if "created_utc" not in kwargs:
             kwargs["created_utc"] = int(time.time())
 
+        if "note" in kwargs:
+            kwargs["_note"]=kwargs["note"]
+
         super().__init__(*args, **kwargs)
 
     def __repr__(self):
@@ -46,27 +49,72 @@ class ModAction(Base, Stndrd, Age_times):
         return ACTIONTYPES[self.kind]
 
     @property
-    def str(self):
+    def note(self):
+
+        if self.kind=="exile_user":
+            if self.target_post:
+                return f'for <a href="{self.target_post.permalink}">post</a>'
+            elif self.target_comment:
+                return f'for <a href="{self.target_comment.permalink}">comment</a>'
+        else:
+            return self._note or ""
+
+    @note.setter
+    def note(self, x):
+        self._note=x
+
+    @property
+    def string(self):
+
         output =  self.actiontype["str"].format(self=self)
+
         if self.note:
-            output +=f" <i>({self.note})</i>"
+            output += f" <i>({self.note})</i>"
 
         return output
 
     @property
     def target_link(self):
-        if self.target_post:
-            return f'<a href="{self.target_post.permalink}">{self.target_post.title}</a>'
-        elif self.target_comment:
-            return f'<a href="{self.target_comment.permalink}">comment</a>'
-        elif self.target_user:
+        if self.target_user:
             if self.target_user.is_deleted:
                 return "[deleted user]"
             else:
                 return f'<a href="{self.target_user.permalink}">{self.target_user.username}</a>'
+        elif self.target_post:
+            return f'<a href="{self.target_post.permalink}">{self.target_post.title}</a>'
+        elif self.target_comment:
+            return f'<a href="{self.target_comment.permalink}">comment</a>'
+
         else:
             return ''
+
+    @property
+    def json(self):
+        data={
+            "id":self.base36id,
+            "guild": self.board.name,
+            "kind": self.kind,
+            "created_utc": self.created_utc,
+            "mod": self.user.username,
+        }
+
+        if self.target_user_id:
+            data["target_user_id"]=self.target_user.base36id
+            data["target_user"]=self.target_user.username
+
+        if self.target_comment_id:
+            data["target_comment_id"]=self.target_comment.base36id
+
+        if self.target_submission_id:
+            data["target_submission_id"]=self.target_submission.base36id
+
+        if self._note:
+            data["note"]=self._note
+
+        return data
     
+
+
 
     @property
     def icon(self):
@@ -120,6 +168,18 @@ ACTIONTYPES={
         "color": "bg-muted",
         "title": 'un-exiled user {self.target_user.username}'
     },
+    "chatban_user":{
+        "str":'chatbanned user {self.target_link}',
+        "icon":"fa-comments-alt",
+        "color": "bg-danger",
+        "title": 'chatbanned user {self.target_user.username}'
+    },
+    "unchatban_user":{
+        "str":'un-chatbanned user {self.target_link}',
+        "icon": "fa-comments-alt",
+        "color": "bg-muted",
+        "title": 'un-chatbanned user {self.target_user.username}'
+    },
     "contrib_user":{
         "str":'added contributor {self.target_link}',
         "icon": "fa-user-check",
@@ -163,7 +223,7 @@ ACTIONTYPES={
         "title": 'pinned a comment'
     },
     "unpin_comment":{
-        "str":'un-pinned a {self.target_link}>',
+        "str":'un-pinned a {self.target_link}',
         "icon":"fa-thumbtack fa-rotate--45",
         "color": "bg-muted",
         "title": 'un-pinned a comment'
@@ -287,5 +347,11 @@ ACTIONTYPES={
         "icon":"fa-user-cog",
         "color": "bg-muted",
         "title": "changed permissions on invitation to {self.target_user.username}"
+    },
+    "create_guild":{
+        "str": 'created +{self.board.name}',
+        "icon": "fa-chess-rook",
+        "color": "bg-primary",
+        "title": "created +{self.board.name}"
     }
 }

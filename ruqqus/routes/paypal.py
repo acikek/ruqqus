@@ -47,6 +47,9 @@ def shop_get_price():
 
     coins=int(request.args.get("coins"))
 
+    if not coins>=1:
+        return jsonify({"error": "Must attempt to buy at least one coin"}), 400
+
     code=request.args.get("promo","")
     promo=get_promocode(code)
 
@@ -127,7 +130,10 @@ def shop_buy_coins_completed(v):
     if not id:
         abort(400)
     id=base36decode(id)
-    txn=g.db.query(PayPalTxn).filter_by(user_id=v.id, id=id, status=1).first()
+    txn=g.db.query(PayPalTxn
+        #).with_for_update(
+        ).options(lazyload('*')).filter_by(user_id=v.id, id=id, status=1).first()
+    #v=g.db.query(User).with_for_update().options(lazyload('*')).filter_by(id=v.id).first()
 
     if not txn:
         abort(400)
@@ -148,6 +154,7 @@ def shop_buy_coins_completed(v):
         v.negative_balance_cents -= txn.usd_cents
 
     g.db.add(v)
+    g.db.commit()
 
     return render_template(
         "single_txn.html", 
@@ -226,7 +233,7 @@ def gift_post_pid(pid, v):
     if post.author_id==v.id:
         return jsonify({"error":"You can't give awards to yourself."}), 403   
 
-    if post.is_deleted:
+    if post.deleted_utc > 0:
         return jsonify({"error":"You can't give awards to deleted posts"}), 403
 
     if post.is_banned:
@@ -246,6 +253,7 @@ def gift_post_pid(pid, v):
     if u.is_blocked:
         return jsonify({"error":"You can't give awards to someone that's blocking you."}), 403
 
+
     coins=int(request.args.get("coins",1))
 
     if not coins:
@@ -254,22 +262,33 @@ def gift_post_pid(pid, v):
     if coins <0:
         return jsonify({"error":"What are you doing, trying to *charge* someone coins?."}), 400
 
+    v=g.db.query(User).with_for_update().options(lazyload('*')).filter_by(id=v.id).first()
+    u=g.db.query(User).with_for_update().options(lazyload('*')).filter_by(id=u.id).first()
+
     if not v.coin_balance>=coins:
         return jsonify({"error":"You don't have that many coins to give!"}), 403
 
-    if not g.db.query(AwardRelationship).filter_by(user_id=v.id, submission_id=post.id).first():
-        text=f"Someone liked [your post]({post.permalink}) and has given you a Coin!\n\n"
-        if not u.has_premium_no_renew:
-            text+="Your Coin has been automatically redeemed for one week of [Ruqqus Premium](/settings/premium)."
-        else:
-            text+="Since you already have Ruqqus Premium, the Coin has been added to your balance. You can keep it for yourself, or give it to someone else."
-        send_notification(u, text)
 
     v.coin_balance -= coins
     u.coin_balance += coins
 
     g.db.add(v)
     g.db.add(u)
+    g.db.flush()
+    if v.coin_balance<0:
+        g.db.rollback()
+        return jsonify({"error":"You don't have that many coins to give!"}), 403
+
+    if not g.db.query(AwardRelationship).filter_by(user_id=v.id, submission_id=post.id).first():
+        text=f"Someone liked [your post]({post.permalink}) and has given you a Coin!\n\n"
+        if u.premium_expires_utc < int(time.time()):
+            text+="Your Coin has been automatically redeemed for one week of [Ruqqus Premium](/settings/premium)."
+        else:
+            text+="Since you already have Ruqqus Premium, the Coin has been added to your balance. You can keep it for yourself, or give it to someone else."
+        send_notification(u, text)
+
+
+
     g.db.commit()
 
     #create record - uniqueness constraints prevent duplicate award counting
@@ -297,7 +316,7 @@ def gift_comment_pid(cid, v):
     if comment.author_id==v.id:
         return jsonify({"error":"You can't give awards to yourself."}), 403      
 
-    if comment.is_deleted:
+    if comment.deleted_utc > 0:
         return jsonify({"error":"You can't give awards to deleted posts"}), 403
 
     if comment.is_banned:
@@ -325,23 +344,32 @@ def gift_comment_pid(cid, v):
     if coins <0:
         return jsonify({"error":"What are you doing, trying to *charge* someone coins?."}), 400
 
+    v=g.db.query(User).with_for_update().options(lazyload('*')).filter_by(id=v.id).first()
+    u=g.db.query(User).with_for_update().options(lazyload('*')).filter_by(id=u.id).first()
+
     if not v.coin_balance>=coins:
+        return jsonify({"error":"You don't have that many coins to give!"}), 403
+        
+    v.coin_balance -= coins
+    u.coin_balance += coins
+    g.db.add(v)
+    g.db.add(u)
+    g.db.flush()
+    if v.coin_balance<0:
+        g.db.rollback()
         return jsonify({"error":"You don't have that many coins to give!"}), 403
 
     if not g.db.query(AwardRelationship).filter_by(user_id=v.id, comment_id=comment.id).first():
         text=f"Someone liked [your comment]({comment.permalink}) and has given you a Coin!\n\n"
-        if not u.has_premium_no_renew:
+        if u.premium_expires_utc < int(time.time()):
             text+="Your Coin has been automatically redeemed for one week of [Ruqqus Premium](/settings/premium)."
         else:
             text+="Since you already have Ruqqus Premium, the Coin has been added to your balance. You can keep it for yourself, or give it to someone else."
 
         send_notification(u, text)
-        
-    v.coin_balance -= coins
-    u.coin_balance += coins
 
-    g.db.add(v)
-    g.db.add(u)
+
+
     g.db.commit()
 
     #create record - uniqe prevents duplicates

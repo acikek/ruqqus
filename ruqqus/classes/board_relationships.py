@@ -7,7 +7,7 @@ from .mix_ins import *
 import time
 
 
-class ModRelationship(Base):
+class ModRelationship(Base, Age_times):
     __tablename__ = "mods"
     id = Column(BigInteger, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id"))
@@ -21,6 +21,7 @@ class ModRelationship(Base):
     perm_config = Column(Boolean, default=False)
     perm_access = Column(Boolean, default=False)
     perm_full = Column(Boolean, default=False)
+    perm_chat = Column(Boolean, default=False)
     #permRules = Column(Boolean, default=False)
     #permTitles = Column(Boolean, default=False)
     #permLodges = Column(Boolean, default=False)
@@ -43,7 +44,7 @@ class ModRelationship(Base):
             return "full"
 
         output=[]
-        for p in ["access","appearance","config","content"]:
+        for p in ["access","appearance","chat", "config","content"]:
             if self.__dict__[f"perm_{p}"]:
                 output.append(p)
 
@@ -53,7 +54,7 @@ class ModRelationship(Base):
     @property
     def permchangelist(self):
         output=[]
-        for p in ["full", "access","appearance","config","content"]:
+        for p in ["full", "access","appearance","chat", "config","content"]:
             if self.__dict__.get(f"perm_{p}"):
                 output.append(f"+{p}")
             else:
@@ -65,16 +66,17 @@ class ModRelationship(Base):
     @property
     def json_core(self):
         return {
-            user_id:self.user_id,
-            board_id:self.board_id,
-            created_utc:self.created_utc,
-            accepted:self.accepted,
-            invite_rescinded:self.invite_rescinded,
-            perm_content:self.perm_content,
-            perm_config:self.perm_config,
-            perm_access:self.perm_access,
-            perm_appearance:self.perm_appearance,
-            perm_full:self.perm_full
+            'user_id':self.user_id,
+            'board_id':self.board_id,
+            'created_utc':self.created_utc,
+            'accepted':self.accepted,
+            'invite_rescinded':self.invite_rescinded,
+            'perm_content':self.perm_full or self.perm_content,
+            'perm_config':self.perm_full or self.perm_config,
+            'perm_access':self.perm_full or self.perm_access,
+            'perm_appearance':self.perm_full or self.perm_appearance,
+            'perm_full':self.perm_full,
+            'perm_chat': self.perm_full or self.perm_chat
         }
 
 
@@ -82,8 +84,8 @@ class ModRelationship(Base):
     def json(self):
         data=self.json_core
 
-        data["user"]=self.user
-        data["guild"]=self.board
+        data["user"]=self.user.json_core
+        #data["guild"]=self.board.json_core
     
         return data
     
@@ -123,10 +125,10 @@ class BanRelationship(Base, Stndrd, Age_times):
     @property
     def json_core(self):
         return {
-            user_id:self.user_id,
-            board_id:self.board_id,
-            created_utc:self.created_utc,
-            mod_id:self.banning_mod_id
+            'user_id':self.user_id,
+            'board_id':self.board_id,
+            'created_utc':self.created_utc,
+            'mod_id':self.banning_mod_id
         }
 
 
@@ -134,12 +136,59 @@ class BanRelationship(Base, Stndrd, Age_times):
     def json(self):
         data=self.json_core
 
-        data["user"]=self.user
-        data["mod"]=self.banning_mod
-        data["guild"]=self.board
+        data["user"]=self.user.json_core
+        data["mod"]=self.banning_mod.json_core
+        data["guild"]=self.board.json_core
 
         return data
 
+class ChatBan(Base, Stndrd, Age_times):
+
+    __tablename__ = "chatbans"
+    id = Column(BigInteger, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    board_id = Column(Integer, ForeignKey("boards.id"))
+    created_utc = Column(BigInteger, default=0)
+    banning_mod_id = Column(Integer, ForeignKey("users.id"))
+
+    user = relationship(
+        "User",
+        lazy="joined",
+        primaryjoin="User.id==ChatBan.user_id")
+    banning_mod = relationship(
+        "User",
+        lazy="joined",
+        primaryjoin="User.id==ChatBan.banning_mod_id")
+    board = relationship("Board")
+
+    def __init__(self, *args, **kwargs):
+        if "created_utc" not in kwargs:
+            kwargs["created_utc"] = int(time.time())
+
+        super().__init__(*args, **kwargs)
+
+    def __repr__(self):
+        return f"<Ban(id={self.id}, uid={self.uid}, board_id={self.board_id})>"
+
+    @property
+    def json_core(self):
+        return {
+            'user_id':self.user_id,
+            'board_id':self.board_id,
+            'created_utc':self.created_utc,
+            'mod_id':self.banning_mod_id
+        }
+
+
+    @property
+    def json(self):
+        data=self.json_core
+
+        data["user"]=self.user.json_core
+        data["mod"]=self.banning_mod.json_core
+        data["guild"]=self.board.json_core
+
+        return data
 class ContributorRelationship(Base, Stndrd, Age_times):
 
     __tablename__ = "contributors"

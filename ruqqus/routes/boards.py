@@ -5,6 +5,7 @@ import sass
 import threading
 import time
 import os.path
+from bs4 import BeautifulSoup
 
 from ruqqus.helpers.wrappers import *
 from ruqqus.helpers.base36 import *
@@ -97,8 +98,10 @@ def create_board_post(v):
 
     # check # recent boards made by user
     cutoff = int(time.time()) - 60 * 60 * 24
+    alt_ids=[x.id for x in v.alts]
+    user_ids=[v.id]+alt_ids
     recent = g.db.query(Board).filter(
-        Board.creator_id == v.id,
+        Board.creator_id.in_(user_ids),
         Board.created_utc >= cutoff).all()
     if len([x for x in recent]) >= 2:
         return render_template("message.html",
@@ -148,6 +151,14 @@ def create_board_post(v):
     sub = Subscription(user_id=v.id,
                        board_id=new_board.id)
     g.db.add(sub)
+
+    #add guild creation mod log entry
+    ma = ModAction(
+        user_id=v.id,
+        board_id=new_board.id,
+        kind="create_guild",
+        )
+    g.db.add(ma)
 
     # clear cache
     cache.delete_memoized(guild_ids, sort="new")
@@ -211,8 +222,9 @@ def board_name(name, v):
     if page == 1 and sort != "new" and not ignore_pinned:
         stickies = g.db.query(Submission.id).filter_by(board_id=board.id,
                                                        is_banned=False,
-                                                       is_deleted=False,
-                                                       is_pinned=True).order_by(Submission.id.asc()
+                                                       is_pinned=True,
+                                                       deleted_utc=0).order_by(Submission.id.asc()
+
                                                                                 ).limit(4)
         stickies = [x[0] for x in stickies]
         ids = stickies + ids
@@ -301,7 +313,17 @@ def mod_distinguish_comment(bid, cid, board, v):
         )
     g.db.add(ma)
 
-    return "", 204
+    html=render_template(
+                "comments.html",
+                v=v,
+                comments=[comment],
+                render_replies=False,
+                is_allowed_to_comment=True
+                )
+
+    html=str(BeautifulSoup(html, features="html.parser").find(id=f"comment-{comment.base36id}-only"))
+
+    return jsonify({"html":html})
 
 @app.route("/mod/kick/<bid>/<pid>", methods=["POST"])
 @app.route("/api/v1/kick/<bid>/<pid>", methods=["POST"])
@@ -378,6 +400,9 @@ def mod_ban_bid_user(bid, board, v):
     if item:
         item=get_from_fullname(item)
 
+        if item.original_board_id != board.id:
+            return jsonify({"error":f"That was originally created in +{item.original_board.name}, not +{board.name}"}), 400
+
     if not user:
         return jsonify({"error": "That user doesn't exist."}), 404
 
@@ -397,6 +422,18 @@ def mod_ban_bid_user(bid, board, v):
     if not board.has_participant(user):
         return jsonify({"error": f"@{user.username} hasn't participated in +{board.name}."}), 403
 
+    if item:
+        if isinstance(item, Submission):
+            target_submission_id=item.id
+            target_comment_id=None
+        elif isinstance(item, Comment):
+            target_submission_id=None
+            target_comment_id=item.id
+    else:
+        target_submission_id=None
+        target_comment_id=None
+
+
     # check for an existing deactivated ban
     existing_ban = g.db.query(BanRelationship).filter_by(
         user_id=user.id, board_id=board.id, is_active=False).first()
@@ -404,6 +441,8 @@ def mod_ban_bid_user(bid, board, v):
         existing_ban.is_active = True
         existing_ban.created_utc = int(time.time())
         existing_ban.banning_mod_id = v.id
+        existing_ban.target_submission_id=target_submission_id
+        existing_ban.target_comment_id=target_comment_id
         g.db.add(existing_ban)
     else:
         new_ban = BanRelationship(user_id=user.id,
@@ -420,24 +459,18 @@ def mod_ban_bid_user(bid, board, v):
 
         send_notification(user, text)
 
-    if item:
-        if isinstance(item, Submission):
-            note=f'for <a href="{item.permalink}">post</a>'
-        elif isinstance(item, Comment):
-            note=f'for <a href="{item.permalink}">comment</a>'
-        else:
-            note=None
-    else:
-        note=None
 
     ma=ModAction(
         kind="exile_user",
         user_id=v.id,
         target_user_id=user.id,
         board_id=board.id,
-        note=note
+        target_submission_id=target_submission_id,
+        target_comment_id=target_comment_id
         )
     g.db.add(ma)
+
+    g.db.commit()
 
 
     if request.args.get("toast"):
@@ -534,10 +567,35 @@ def mod_take_pid(pid, board, v):
     #check cooldowns
     now=int(time.time())
     if post.original_board_id != board.id and post.author_id != v.id:
-        if now <  v.last_yank_utc + 3600:
-            return jsonify({'error':f"You've yanked a post recently. You need to wait 1 hour between yanks."}), 401
-        elif now <  board.last_yank_utc + 3600:
-            return jsonify({'error':f"+{board.name} has yanked a post recently. The Guild needs to wait 1 hour between yanks."}), 401
+        #look for modlog action with either board or user
+
+        recent_yank = g.db.query(ModAction).filter(
+            #yank records for the guild or user within the last hour..
+            ModAction.kind=="yank_post",
+            ModAction.created_utc>now-3600,
+            or_(
+                ModAction.user_id==v.id,
+                ModAction.board_id==board.id
+                )
+            ).join(
+            ModAction.target_post
+            #...which were not originally from the user or guild
+            ).filter(
+                Submission.original_board_id!=board.id,
+                Submission.author_id!=v.id
+            ).order_by(
+                ModAction.user_id==v.id,
+                ModAction.created_utc.desc()
+            ).options(
+                contains_eager(ModAction.target_post)
+            ).first()
+
+
+        if recent_yank:
+            if recent_yank.user_id==v.id:
+                return jsonify({'error':f"You've yanked a post recently. You need to wait 1 hour between yanks."}), 401
+            else:
+                return jsonify({'error':f"+{board.name} has yanked a post recently. The Guild needs to wait 1 hour between yanks."}), 401
 
 
     if board.is_banned:
@@ -566,11 +624,6 @@ def mod_take_pid(pid, board, v):
     g.db.add(post)
 
     if post.original_board_id != board.id and post.author_id != v.id:
-        board.last_yank_utc=now
-        v.last_yank_utc=now
-
-        g.db.add(board)
-        g.db.add(v)
 
         notif_text=f"Your post [{post.title}]({post.permalink}) has been Yanked from +general to +{board.name}.\n\nIf you don't want it there, just click `Remove from +{board.name}` on the post."
         send_notification(post.author, notif_text)
@@ -598,7 +651,11 @@ def mod_invite_username(bid, board, v):
 
     username = request.form.get("username", '').lstrip('@')
     user = get_user(username)
+    if not user:
+        return jsonify({"error": "That user doesn't exist."}), 404
 
+    if board.has_ban(user):
+        return jsonify({"error": f"@{user.username} is exiled from +{board.name} and can't currently become a guildmaster."}), 409
     if not user.can_join_gms:
         return jsonify({"error": f"@{user.username} already leads enough guilds."}), 409
 
@@ -673,8 +730,10 @@ def mod_rescind_bid_username(bid, username, board, v):
 
 
 @app.route("/mod/accept/<bid>", methods=["POST"])
+@app.route("/api/v1/accept_invite/<bid>", methods=["POST"])
 @auth_required
 @validate_formkey
+@api("guildmaster")
 def mod_accept_board(bid, v):
 
     board = get_board(bid)
@@ -685,8 +744,10 @@ def mod_accept_board(bid, v):
 
     if not v.can_join_gms:
         return jsonify({"error": f"You already lead enough guilds."}), 409
-
+    if board.has_ban(v):
+        return jsonify({"error": f"You are exiled from +{board.name} and can't currently become a guildmaster."}), 409
     x.accepted = True
+    x.created_utc=int(time.time())
     g.db.add(x)
 
     ma=ModAction(
@@ -822,6 +883,25 @@ def mod_bid_settings_optout(bid, board, v):
     g.db.add(ma)
     return "", 204
 
+@app.route("/mod/<bid>/settings/public_chat", methods=["POST"])
+@auth_required
+@is_guildmaster("config", "chat")
+@validate_formkey
+def mod_bid_settings_public_chat(bid, board, v):
+
+    # nsfw
+    board.public_chat = bool(request.form.get("public_chat", False) == 'true')
+
+    g.db.add(board)
+
+    ma=ModAction(
+        kind="update_settings",
+        user_id=v.id,
+        board_id=board.id,
+        note=f"public_chat={board.public_chat}"
+        )
+    g.db.add(ma)
+    return "", 204
 
 @app.route("/mod/<bid>/settings/restricted", methods=["POST"])
 @auth_required
@@ -857,6 +937,10 @@ def mod_bid_settings_private(bid, board, v):
     board.is_private = bool(request.form.get("guildprivacy", False) == 'true')
 
     g.db.add(board)
+    g.db.flush()
+    board.stored_subscriber_count=board.subscriber_count
+    g.db.add(board)
+    g.db.commit()
 
     ma=ModAction(
         kind="update_settings",
@@ -865,6 +949,8 @@ def mod_bid_settings_private(bid, board, v):
         note=f"private={board.is_private}"
         )
     g.db.add(ma)
+
+
     return "", 204
 
 
@@ -1014,12 +1100,19 @@ def board_about_appearance(boardname, board, v):
 
 
 @app.route("/+<boardname>/mod/mods", methods=["GET"])
+@app.route("/api/vue/+<boardname>/mod/mods",  methods=["GET"])
 @app.route("/api/v1/<boardname>/mod/mods", methods=["GET"])
 @auth_desired
 @api("read")
 def board_about_mods(boardname, v):
 
     board = get_guild(boardname)
+
+    if board.is_banned:
+        return {
+        "html":lambda:(render_template("board_banned.html", v=v, b=board), 403),
+        "api":lambda:(jsonify({"error":f"+{board.name} is banned"}), 403)
+        }
 
     me = board.has_mod(v)
 
@@ -1056,6 +1149,35 @@ def board_about_exiled(boardname, board, v):
             ),
         "api":lambda:jsonify({"data":[x.json for x in bans]})
         }
+
+@app.route("/+<boardname>/mod/chatbans", methods=["GET"])
+@app.route("/api/v1/<boardname>/mod/chatbans", methods=["GET"])
+@auth_required
+@is_guildmaster("chat")
+@api("read", "guildmaster")
+def board_about_chatbanned(boardname, board, v):
+
+    page = int(request.args.get("page", 1))
+
+    bans = board.chatbans.order_by(
+        ChatBan.created_utc.desc()).offset(25 * (page - 1)).limit(26)
+
+    bans = [ban for ban in bans]
+    next_exists = (len(bans) == 26)
+    bans = bans[0:25]
+
+    return {
+        "html":lambda:render_template(
+            "guild/chatbans.html", 
+            v=v, 
+            b=board, 
+            bans=bans,
+            page=page,
+            next_exists=next_exists
+            ),
+        "api":lambda:jsonify({"data":[x.json for x in bans]})
+        }
+
 
 
 @app.route("/+<boardname>/mod/contributors", methods=["GET"])
@@ -1221,6 +1343,9 @@ def all_mod_queue(v):
 @validate_formkey
 def mod_board_images_profile(bid, board, v):
 
+    if request.headers.get("cf-ipcountry")=="T1" and not v.is_activated:
+        return jsonfiy({"error":"You must have a verified email address to upload images via Tor."}), 401
+
     board.set_profile(request.files["profile"])
 
     # anti csam
@@ -1248,6 +1373,9 @@ def mod_board_images_profile(bid, board, v):
 @is_guildmaster("appearance")
 @validate_formkey
 def mod_board_images_banner(bid, board, v):
+
+    if request.headers.get("cf-ipcountry")=="T1" and not v.is_activated:
+        return jsonify({"error":"You must have a verified email address to upload images via Tor."}), 401
 
     board.set_banner(request.files["banner"])
 
@@ -1309,13 +1437,17 @@ def mod_board_images_delete_banner(bid, board, v):
     return redirect(f"/+{board.name}/mod/appearance?msg=Success#images")
 
 
-@app.route("/assets/<boardname>/main/<x>.css", methods=["GET"])
+@app.route("/assets/<board_fullname>/main/<x>.css", methods=["GET"])
 #@cache.memoize(60*6*24)
-def board_css(boardname, x):
+def board_css(board_fullname, x):
 
-    # temp
+    try:
+        b36id=board_fullname.split('_')[1]
+    except IndexError:
+        print(request.headers.get("Referer",request.headers.get("Referrer")))
+        abort(500)
 
-    board = get_guild(boardname)
+    board = get_board(b36id)
 
     if int(x) != board.color_nonce:
         return redirect(board.css_url)
@@ -1340,14 +1472,18 @@ def board_css(boardname, x):
     return resp
 
 
-@app.route("/assets/<boardname>/dark/<x>.css", methods=["GET"])
+@app.route("/assets/<board_fullname>/dark/<x>.css", methods=["GET"])
 #@cache.memoize(60*60*24)
-def board_dark_css(boardname, x):
+def board_dark_css(board_fullname, x):
 
-    # temp
-    # return redirect("/assets/style/main_dark.css")
 
-    board = get_guild(boardname)
+    try:
+        b36id=board_fullname.split('_')[1]
+    except IndexError:
+        print(request.headers.get("Referer",request.headers.get("Referrer")))
+        abort(500)
+
+    board = get_board(b36id)
 
     if int(x) != board.color_nonce:
         return redirect(board.css_dark_url)
@@ -1522,11 +1658,35 @@ def siege_guild(v):
     guild = get_guild(guild)
 
     # check time
-    if v.last_siege_utc > now - (60 * 60 * 24 * 30):
+    if v.last_siege_utc > now - (60 * 60 * 24 * 7):
         return render_template("message.html",
                                v=v,
                                title=f"Siege against +{guild.name} Failed",
-                               error="You need to wait 30 days between siege attempts."
+                               error="You need to wait 7 days between siege attempts."
+                               ), 403
+    # check guild count
+    if not v.can_join_gms and guild not in v.boards_modded:
+        return render_template("message.html",
+                               v=v,
+                               title=f"Siege against +{guild.name} Failed",
+                               error="You already lead the maximum number of guilds."
+                               ), 403
+
+    # Can't siege if exiled
+    if g.db.query(BanRelationship).filter_by(is_active=True, user_id=v.id, board_id=guild.id).first():
+        return render_template(
+            "message.html",
+            v=v,
+            title=f"Siege against +{guild.name} Failed",
+            error=f"You may not siege guilds that you are exiled from."
+            ), 403
+
+    # Cannot siege +general, +ruqqus, +ruqquspress, +ruqqusdmca
+    if not guild.is_siegable:
+        return render_template("message.html",
+                               v=v,
+                               title=f"Siege against +{guild.name} Failed",
+                               error=f"+{guild.name} is an admin-controlled guild and is immune to siege."
                                ), 403
 
     # update siege date
@@ -1536,112 +1696,108 @@ def siege_guild(v):
         alt.last_siege_utc = now
         g.db.add(v)
 
-    # check guild count
-    if not v.can_join_gms and guild not in v.boards_modded:
-        return render_template("message.html",
-                               v=v,
-                               title=f"Siege against +{guild.name} Failed",
-                               error="You already lead the maximum number of guilds."
-                               ), 403
+    #check user subscription time
 
-    # Cannot siege +general, +ruqqus, +ruqquspress, +ruqqusdmca
-    if not guild.is_siegable:
-        return render_template("message.html",
-                               v=v,
-                               title=f"Siege against +{guild.name} Failed",
-                               error=f"+{guild.name} is an admin-controlled guild and is immune to siege. You may try again in 30 days."
-                               ), 403
+
 
     # check user activity
-    # karma=sum([x.score_top for x in v.submissions.filter_by(board_id=guild.id)])
-    # karma+=sum([x.score_top for x in v.comments.filter_by(board_id=guild.id)])
-# if karma < 100:
-# return render_template("message.html",
-# v=v,
-# title=f"Siege against +{guild.name} Failed",
-# error=f"You do not have enough Reputation in +{guild.name} to siege it. You may try again in 30 days."
-# ), 403
+    if guild not in v.boards_modded and v.guild_rep(guild, recent=180) < guild.siege_rep_requirement and not guild.has_contributor(v):
+        return render_template(
+            "message.html",
+            v=v,
+            title=f"Siege against +{guild.name} Failed",
+            error=f"You do not have enough recent Reputation in +{guild.name} to siege it. +{guild.name} currently requires {guild.siege_rep_requirement} Rep within the last 180 days, and you only have {v.guild_rep(guild, recent=180)}. You may try again in 7 days."
+            ), 403
 
     # Assemble list of mod ids to check
     # skip any user with a perm site-wide ban
     # skip any deleted mod
-    mods = [x for x in guild.mods if not x.is_deleted]
 
+    #check mods above user
+    mods=[]
+    for x in guild.mods_list:
+        if x.user_id==v.id:
+            break
+        mods.append(x)
     # if no mods, skip straight to success
     if mods:
 
-        ids = [x.id for x in mods]
+        ids = [x.user_id for x in mods]
 
         # cutoff
         cutoff = now - 60 * 60 * 24 * 60
 
         # check submissions
 
-        if g.db.query(Submission).filter(Submission.author_id.in_(
-                ids), Submission.created_utc > cutoff).first():
+        post= g.db.query(Submission).filter(Submission.author_id.in_(tuple(ids)), 
+                                        Submission.created_utc > cutoff,
+                                        Submission.original_board_id==guild.id,
+                                        Submission.deleted_utc==0,
+                                        Submission.is_banned==False).first()
+        if post:
             return render_template("message.html",
                                    v=v,
                                    title=f"Siege against +{guild.name} Failed",
-                                   error="Your siege failed. One of the guildmasters has post or comment activity in the last 60 days. You may try again in 30 days."
+                                   error=f"Your siege failed. One of the guildmasters created a post in +{guild.name} within the last 60 days. You may try again in 7 days.",
+                                   link=post.permalink,
+                                   link_text="View post"
                                    ), 403
 
         # check comments
-        if g.db.query(Comment).filter(Comment.author_id.in_(ids),
-                                      Comment.created_utc > cutoff).first():
+        comment= g.db.query(Comment).filter(
+            Comment.author_id.in_(tuple(ids)),
+            Comment.created_utc > cutoff,
+            Comment.original_board_id==guild.id,
+            Comment.deleted_utc==0,
+            Comment.is_banned==False).first()
+
+        if comment:
             return render_template("message.html",
                                    v=v,
                                    title=f"Siege against +{guild.name} Failed",
-                                   error="Your siege failed. One of the guildmasters has post or comment activity in the last 60 days. You may try again in 30 days."
+                                   error=f"Your siege failed. One of the guildmasters created a comment in +{guild.name} within the last 60 days. You may try again in 7 days.",
+                                   link=comment.permalink,
+                                   link_text="View comment"
                                    ), 403
 
-        # check post votes
-        if g.db.query(Vote).filter(Vote.user_id.in_(ids),
-                                   Vote.created_utc > cutoff).first():
-            return render_template("message.html",
-                                   v=v,
-                                   title=f"Siege against +{guild.name} Failed",
-                                   error="Your siege failed. One of the guildmasters has voting activity in the last 60 days. You may try again in 30 days."
-                                   ), 403
+        # check mod actions
+        ma = g.db.query(ModAction).filter(
+            or_(
+                #option 1: mod action by user
+                and_(
+                    ModAction.user_id.in_(tuple(ids)),
+                    ModAction.created_utc > cutoff,
 
-        # check comment votes
-        if g.db.query(CommentVote).filter(CommentVote.user_id.in_(
-                ids), CommentVote.created_utc > cutoff).first():
+                    ModAction.board_id==guild.id
+                    ),
+                #option 2: ruqqus adds user as mod due to siege
+                and_(
+                    ModAction.user_id==1,
+                    ModAction.target_user_id.in_(tuple(ids)),
+                    ModAction.kind=="add_mod",
+                    ModAction.board_id==guild.id
+                    )
+                )
+            ).first()
+        if ma:
             return render_template("message.html",
                                    v=v,
                                    title=f"Siege against +{guild.name} Failed",
-                                   error="Your siege failed. One of the guildmasters has voting activity in the last 60 days. You may try again in 30 days."
-                                   ), 403
-
-        # check flags
-        if g.db.query(Flag).filter(Flag.user_id.in_(ids),
-                                   Flag.created_utc > cutoff).first():
-            return render_template("message.html",
-                                   v=v,
-                                   title=f"Siege against +{guild.name} Failed",
-                                   error="Your siege failed. One of the guildmasters has private activity in the last 60 days. You may try again in 30 days."
-                                   ), 403
-        # check reports
-        if g.db.query(Report).filter(Report.user_id.in_(ids),
-                                     Report.created_utc > cutoff).first():
-            return render_template("message.html",
-                                   v=v,
-                                   title=f"Siege against +{guild.name} Failed",
-                                   error="Your siege failed. One of the guildmasters has private activity in the last 60 days. You may try again in 30 days."
-                                   ), 403
-
-        # check exiles
-        if g.db.query(BanRelationship).filter(BanRelationship.banning_mod_id.in_(
-                ids), BanRelationship.created_utc > cutoff).first():
-            return render_template("message.html",
-                                   v=v,
-                                   title=f"Siege against +{guild.name} Failed",
-                                   error="Your siege failed. One of the guildmasters has private activity in the last 60 days. You may try again in 30 days."
+                                   error=f"Your siege failed. One of the guildmasters has performed a mod action in +{guild.name} within the last 60 days. You may try again in 7 days.",
+                                   link=ma.permalink,
+                                   link_text="View mod log record"
                                    ), 403
 
     #Siege is successful
 
-    # delete and notify mods
+    #look up current mod record if one exists
+    m=guild.has_mod(v)
+
+    #remove current mods. If they are at or below existing mod, leave in place
     for x in guild.moderators:
+
+        if m and x.id>=m.id and x.accepted:
+            continue
 
         if x.accepted:
             send_notification(x.user,
@@ -1668,8 +1824,7 @@ def siege_guild(v):
 
         g.db.delete(x)
 
-    # add new mod if user is not already
-    m=guild.has_mod(v)
+
     if not m:
         new_mod = ModRelationship(user_id=v.id,
                                   board_id=guild.id,
@@ -1693,9 +1848,11 @@ def siege_guild(v):
         g.db.add(ma)
 
     elif not m.perm_full:
-        for p in m.__dict__:
-            if p.startswith("perm_"):
-                m.__dict__[p]=True
+        m.perm_full=True
+        m.perm_access=True
+        m.perm_appearance=True
+        m.perm_config=True
+        m.perm_content=True
         g.db.add(p)
         ma=ModAction(
             kind="change_perms",
@@ -1759,7 +1916,8 @@ def board_comments(boardname, v):
                               page=page,
                               nsfw=v and v.over_18,
                               nsfl=v and v.show_nsfl,
-                              hide_offensive=v and v.hide_offensive)
+                              hide_offensive=(v and v.hide_offensive) or not v,
+                              hide_bot=v and v.hide_bot)
 
     next_exists = len(idlist) == 26
 
@@ -1809,11 +1967,19 @@ def change_guild_category(v, board, bid, category):
 
 
 @app.route("/+<boardname>/mod/log", methods=["GET"])
+@app.route("/api/v1/mod_log/<boardname>", methods=["GET"])
 @auth_desired
+@api("read")
 def board_mod_log(boardname, v):
 
     page=int(request.args.get("page",1))
     board=get_guild(boardname)
+
+    if board.is_banned:
+        return {
+            "html":lambda:(render_template("board_banned.html", v=v, b=board), 403),
+            "api":lambda:(jsonify({"error":f"+{board.name} is banned"}), 403)
+            }
 
     actions=g.db.query(ModAction).filter_by(board_id=board.id).order_by(ModAction.id.desc()).offset(25*(page-1)).limit(26).all()
     actions=[i for i in actions]
@@ -1821,13 +1987,17 @@ def board_mod_log(boardname, v):
     next_exists=len(actions)==26
     actions=actions[0:25]
 
-    return render_template("guild/modlog.html",
-        v=v,
-        b=board,
-        actions=actions,
-        next_exists=next_exists,
-        page=page
-        )
+    return {
+        "html":lambda:render_template(
+            "guild/modlog.html",
+            v=v,
+            b=board,
+            actions=actions,
+            next_exists=next_exists,
+            page=page
+        ),
+        "api":lambda:jsonify({"data":[x.json for x in actions]})
+        }
 
 @app.route("/+<boardname>/mod/log/<aid>", methods=["GET"])
 @auth_desired
@@ -1869,6 +2039,7 @@ def board_mod_perms_change(boardname, board, v):
     u_mod.perm_full         = bool(request.form.get("perm_full"         , False))
     u_mod.perm_access       = bool(request.form.get("perm_access"       , False))
     u_mod.perm_appearance   = bool(request.form.get("perm_appearance"   , False))
+    u_mod.perm_chat         = bool(request.form.get("perm_chat"       , False))
     u_mod.perm_config       = bool(request.form.get("perm_config"       , False))
     u_mod.perm_content      = bool(request.form.get("perm_content"      , False))
 
@@ -1885,3 +2056,80 @@ def board_mod_perms_change(boardname, board, v):
     g.db.add(ma)
 
     return redirect(f"{board.permalink}/mod/mods")
+
+# @app.route("/mod/chatban/<bid>", methods=["POST"])
+# @app.route("/api/v1/chatban/<bid>", methods=["POST"])
+# @auth_required
+# @is_guildmaster('chat')
+# @api("guildmaster")
+# @validate_formkey
+# def mod_chatban_bid_user(bid, board, v):
+
+#     user = get_user(request.values.get("username"), graceful=True)
+
+#     if not user:
+#         return jsonify({"error": "That user doesn't exist."}), 404
+
+#     if user.id == v.id:
+#         return jsonify({"error": "You can't chatban yourself."}), 409
+
+#     if g.db.query(ChatBan).filter_by(user_id=user.id, board_id=board.id, is_active=True).first():
+#         return jsonify({"error": f"@{user.username} is already chatbanned from +{board.name}."}), 409
+
+#     if board.has_contributor(user):
+#         return jsonify({"error": f"@{user.username} is an approved contributor to +{board.name} and can't currently be chatbanned."}), 409
+
+#     if board.has_mod(user):
+#         return jsonify({"error": "You can't chatban other guildmasters."}), 409
+
+#     new_ban = BanRelationship(user_id=user.id,
+#                               board_id=board.id,
+#                               banning_mod_id=v.id,
+#                               is_active=True)
+#     g.db.add(new_ban)
+
+#     ma=ModAction(
+#         kind="chatban_user",
+#         user_id=v.id,
+#         target_user_id=user.id,
+#         board_id=board.id
+#         )
+#     g.db.add(ma)
+
+#     g.db.commit()
+
+
+#     if request.args.get("toast"):
+#         return jsonify({"message": f"@{user.username} was exiled from +{board.name}"})
+#     else:
+#         return "", 204
+
+
+@app.route("/mod/unchatban/<bid>", methods=["POST"])
+@app.route("/api/v1/unchatban/<bid>", methods=["POST"])
+@auth_required
+@is_guildmaster('chat')
+@api("guildmaster")
+@validate_formkey
+def mod_unchatban_bid_user(bid, board, v):
+
+    user = get_user(request.values.get("username"))
+
+    x =  g.db.query(ChatBan).filter_by(board_id=board.id, user_id=user.id).first()
+
+    if not x:
+        abort(409)
+
+    g.db.delete(x)
+
+    ma=ModAction(
+        kind="unchatban_user",
+        user_id=v.id,
+        target_user_id=user.id,
+        board_id=board.id
+        )
+    g.db.add(ma)
+
+    g.db.commit()
+
+    return "", 204
